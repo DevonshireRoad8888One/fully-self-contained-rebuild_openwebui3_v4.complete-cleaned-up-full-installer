@@ -1,0 +1,515 @@
+cat > "$HOME/rebuild_openwebui3_v4.sh" <<'REBUILD4'
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd "$HOME"
+
+BASE="$HOME/openwebui3"
+WEBUI_PORT="8001"
+OLLAMA_PORT="11436"
+OPENWEBUI_VERSION="0.9.6"
+
+echo "=================================================="
+echo " Secure Open WebUI + Ollama Local Installer v4"
+echo " Folder:      $BASE"
+echo " WebUI Port:  $WEBUI_PORT"
+echo " Ollama Port: $OLLAMA_PORT"
+echo "=================================================="
+
+echo "🔧 Updating system and installing required dependencies..."
+sudo apt update
+sudo apt upgrade -y
+
+sudo apt install -y \
+  software-properties-common \
+  curl \
+  ca-certificates \
+  gnupg \
+  lsb-release \
+  psmisc \
+  iproute2 \
+  zstd \
+  ffmpeg \
+  build-essential \
+  pkg-config
+
+echo "🐍 Installing Python 3.12..."
+
+if ! command -v python3.12 >/dev/null 2>&1; then
+  echo "🐍 Python 3.12 not found. Adding deadsnakes PPA..."
+  sudo add-apt-repository ppa:deadsnakes/ppa -y
+  sudo apt update
+fi
+
+sudo apt install -y \
+  python3.12 \
+  python3.12-dev \
+  python3.12-venv \
+  python3-pip
+
+echo "✅ System dependencies installed."
+
+echo "🧠 Checking Ollama installation..."
+if ! command -v ollama >/dev/null 2>&1; then
+  echo "🧠 Installing Ollama..."
+  curl -fsSL https://ollama.com/install.sh | sh
+  sleep 3
+else
+  echo "✅ Ollama is already installed."
+fi
+
+echo "📁 Creating fresh isolated folder structure..."
+rm -rf "$BASE"
+mkdir -p "$BASE"/{data,models,logs,run}
+chmod 700 "$BASE"
+chmod 700 "$BASE/data" "$BASE/models" "$BASE/logs" "$BASE/run"
+
+echo "🐍 Creating Python virtual environment with Python 3.12..."
+python3.12 -m venv "$BASE/env1"
+
+echo "⬆️ Upgrading pip tools..."
+cd "$BASE"
+source "$BASE/env1/bin/activate"
+python -m pip install --upgrade pip setuptools wheel
+
+echo "🌐 Installing Open WebUI..."
+if ! pip install "open-webui==$OPENWEBUI_VERSION"; then
+  echo "⚠️ Specific Open WebUI version failed. Installing latest open-webui instead..."
+  pip install open-webui
+fi
+
+deactivate
+
+echo "🔐 Generating secure WebUI secret key..."
+SECRET="$(python3.12 - <<'PY'
+import secrets
+print(secrets.token_urlsafe(48))
+PY
+)"
+
+echo "$SECRET" > "$BASE/.webui_secret_key"
+chmod 600 "$BASE/.webui_secret_key"
+
+echo "🔐 Creating hardened .env file..."
+cat > "$BASE/.env" <<ENV
+WEBUI_PORT="$WEBUI_PORT"
+OLLAMA_PORT="$OLLAMA_PORT"
+WEBUI_SECRET_KEY="$SECRET"
+
+WEBUI_AUTH="True"
+ENABLE_SIGNUP="False"
+WEBUI_DISABLE_SIGNUP="True"
+JWT_EXPIRES_IN="30d"
+ENABLE_PERSISTENT_CONFIG="True"
+
+CORS_ALLOW_ORIGIN="http://127.0.0.1:$WEBUI_PORT;http://localhost:$WEBUI_PORT"
+OLLAMA_ORIGINS="http://127.0.0.1:$WEBUI_PORT,http://localhost:$WEBUI_PORT"
+
+HOST="127.0.0.1"
+PORT="$WEBUI_PORT"
+ENV
+
+chmod 600 "$BASE/.env"
+
+echo "📝 Creating secure start.sh..."
+cat > "$BASE/start.sh" <<'START4'
+#!/usr/bin/env bash
+set -euo pipefail
+
+BASE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+if [ -f "$BASE/.env" ]; then
+  set -a
+  . "$BASE/.env"
+  set +a
+fi
+
+WEBUI_PORT="${WEBUI_PORT:-8001}"
+OLLAMA_PORT="${OLLAMA_PORT:-11436}"
+
+WEBUI_URL="http://127.0.0.1:$WEBUI_PORT"
+OLLAMA_URL="http://127.0.0.1:$OLLAMA_PORT"
+
+pids_on_port() {
+  ss -ltnp "sport = :$1" 2>/dev/null | grep -o 'pid=[0-9]\+' | cut -d= -f2 | sort -u || true
+}
+
+echo "=================================================="
+echo "🔒 Starting Secure Local Open WebUI"
+echo "=================================================="
+echo "🌐 Open WebUI: $WEBUI_URL"
+echo "🧠 Ollama:     $OLLAMA_URL"
+echo "📁 Folder:     $BASE"
+echo ""
+echo "Security mode:"
+echo "  - WebUI bound to 127.0.0.1"
+echo "  - Ollama bound to 127.0.0.1"
+echo "  - Authentication enabled"
+echo "  - New signups disabled"
+echo "  - CORS restricted to localhost"
+echo "  - Ollama origins restricted"
+echo "=================================================="
+
+if [ ! -d "$BASE/env1" ] || [ ! -x "$BASE/env1/bin/open-webui" ]; then
+  echo "❌ Missing Python virtual environment or open-webui executable."
+  echo "Run the installer again."
+  exit 1
+fi
+
+if ! command -v ollama >/dev/null 2>&1; then
+  echo "❌ Ollama command not found."
+  exit 1
+fi
+
+mkdir -p "$BASE/data" "$BASE/models" "$BASE/logs" "$BASE/run"
+chmod 700 "$BASE/data" "$BASE/models" "$BASE/logs" "$BASE/run" 2>/dev/null || true
+
+# Prefer the separate protected secret key file.
+if [ -f "$BASE/.webui_secret_key" ]; then
+  WEBUI_SECRET_KEY="$(cat "$BASE/.webui_secret_key")"
+elif [ -z "${WEBUI_SECRET_KEY:-}" ]; then
+  echo "⚠️ No WEBUI_SECRET_KEY found. Generating a temporary one."
+  WEBUI_SECRET_KEY="$(python3 - <<'PY'
+import secrets
+print(secrets.token_urlsafe(48))
+PY
+)"
+fi
+
+# ==================== Security Environment ====================
+
+export WEBUI_SECRET_KEY="$WEBUI_SECRET_KEY"
+
+export WEBUI_AUTH="True"
+export ENABLE_SIGNUP="False"
+export WEBUI_DISABLE_SIGNUP="True"
+export JWT_EXPIRES_IN="30d"
+export ENABLE_PERSISTENT_CONFIG="True"
+
+export CORS_ALLOW_ORIGIN="http://127.0.0.1:$WEBUI_PORT;http://localhost:$WEBUI_PORT"
+
+export OLLAMA_HOST="127.0.0.1:$OLLAMA_PORT"
+export OLLAMA_MODELS="$BASE/models"
+export OLLAMA_ORIGINS="http://127.0.0.1:$WEBUI_PORT,http://localhost:$WEBUI_PORT"
+
+# ==================== Start Ollama ====================
+
+if curl -fsS "$OLLAMA_URL/api/version" >/dev/null 2>&1; then
+  echo "✅ Isolated Ollama already running on $OLLAMA_URL"
+else
+  if [ -n "$(pids_on_port "$OLLAMA_PORT")" ]; then
+    echo "❌ Port $OLLAMA_PORT is already in use by another process."
+    echo "Run this to inspect:"
+    echo "  ss -ltnp \"sport = :$OLLAMA_PORT\""
+    exit 1
+  fi
+
+  echo "🔄 Starting isolated Ollama..."
+
+  (
+    export OLLAMA_HOST="127.0.0.1:$OLLAMA_PORT"
+    export OLLAMA_MODELS="$BASE/models"
+    export OLLAMA_ORIGINS="http://127.0.0.1:$WEBUI_PORT,http://localhost:$WEBUI_PORT"
+    nohup ollama serve > "$BASE/logs/ollama.log" 2>&1 &
+    echo $! > "$BASE/run/ollama.pid"
+  )
+
+  OLLAMA_READY="False"
+
+  for i in $(seq 1 30); do
+    if curl -fsS "$OLLAMA_URL/api/version" >/dev/null 2>&1; then
+      echo "✅ Ollama ready on $OLLAMA_URL"
+      OLLAMA_READY="True"
+      break
+    fi
+    sleep 1
+  done
+
+  if [ "$OLLAMA_READY" != "True" ]; then
+    echo "❌ Ollama did not become ready."
+    echo "Last Ollama log lines:"
+    tail -50 "$BASE/logs/ollama.log" 2>/dev/null || true
+    exit 1
+  fi
+fi
+
+# ==================== Start Open WebUI ====================
+
+if curl -sS "$WEBUI_URL" >/dev/null 2>&1; then
+  echo "✅ Open WebUI already appears to be running on $WEBUI_URL"
+  exit 0
+fi
+
+if [ -n "$(pids_on_port "$WEBUI_PORT")" ]; then
+  echo "❌ Port $WEBUI_PORT is already in use."
+  echo "Run this to inspect:"
+  echo "  ss -ltnp \"sport = :$WEBUI_PORT\""
+  exit 1
+fi
+
+echo "🚀 Starting Open WebUI securely..."
+
+source "$BASE/env1/bin/activate"
+
+export DATA_DIR="$BASE/data"
+
+export OLLAMA_BASE_URL="$OLLAMA_URL"
+export OLLAMA_API_BASE_URL="$OLLAMA_URL"
+export OLLAMA_BASE_URLS="$OLLAMA_URL"
+
+export HOST="127.0.0.1"
+export PORT="$WEBUI_PORT"
+
+cd "$BASE"
+
+echo ""
+echo "=================================================="
+echo "✅ Local secure mode is configured."
+echo ""
+echo "Open this address in your browser:"
+echo "  $WEBUI_URL"
+echo ""
+echo "Important:"
+echo "  - On first launch, create your admin account."
+echo "  - New signups are disabled after the initial setup."
+echo "  - Do not port-forward $WEBUI_PORT or $OLLAMA_PORT unless you understand the risk."
+echo ""
+echo "To check security later, run:"
+echo "  $BASE/check-security.sh"
+echo ""
+echo "To stop services, run:"
+echo "  $BASE/stop.sh"
+echo "=================================================="
+echo ""
+
+exec "$BASE/env1/bin/open-webui" serve --host 127.0.0.1 --port "$WEBUI_PORT"
+START4
+
+echo "📝 Creating stop.sh..."
+cat > "$BASE/stop.sh" <<'STOP4'
+#!/usr/bin/env bash
+set -euo pipefail
+
+BASE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+if [ -f "$BASE/.env" ]; then
+  set -a
+  . "$BASE/.env"
+  set +a
+fi
+
+WEBUI_PORT="${WEBUI_PORT:-8001}"
+OLLAMA_PORT="${OLLAMA_PORT:-11436}"
+
+pids_on_port() {
+  ss -ltnp "sport = :$1" 2>/dev/null | grep -o 'pid=[0-9]\+' | cut -d= -f2 | sort -u || true
+}
+
+kill_pids() {
+  NAME="$1"
+  PIDS="$2"
+
+  [ -z "$PIDS" ] && return
+
+  echo "🛑 Stopping $NAME: $PIDS"
+
+  for PID in $PIDS; do
+    kill "$PID" 2>/dev/null || true
+  done
+
+  sleep 2
+
+  for PID in $PIDS; do
+    if kill -0 "$PID" 2>/dev/null; then
+      kill -9 "$PID" 2>/dev/null || true
+    fi
+  done
+}
+
+echo "🛑 Stopping Secure Open WebUI setup..."
+
+WEBUI_PIDS="$(pids_on_port "$WEBUI_PORT")"
+kill_pids "Open WebUI" "$WEBUI_PIDS"
+
+OLLAMA_PIDS="$(pids_on_port "$OLLAMA_PORT")"
+
+if [ -z "$OLLAMA_PIDS" ] && [ -f "$BASE/run/ollama.pid" ]; then
+  PID_FROM_FILE="$(cat "$BASE/run/ollama.pid" 2>/dev/null || true)"
+  if [ -n "$PID_FROM_FILE" ] && kill -0 "$PID_FROM_FILE" 2>/dev/null; then
+    OLLAMA_PIDS="$PID_FROM_FILE"
+  fi
+fi
+
+kill_pids "Ollama" "$OLLAMA_PIDS"
+
+rm -f "$BASE/run/ollama.pid"
+
+echo "✅ Stopped."
+STOP4
+
+echo "📝 Creating check-security.sh..."
+cat > "$BASE/check-security.sh" <<'CHECK4'
+#!/usr/bin/env bash
+set -euo pipefail
+
+BASE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+if [ -f "$BASE/.env" ]; then
+  set -a
+  . "$BASE/.env"
+  set +a
+fi
+
+WEBUI_PORT="${WEBUI_PORT:-8001}"
+OLLAMA_PORT="${OLLAMA_PORT:-11436}"
+
+echo "=================================================="
+echo " Open WebUI Local Security Check"
+echo "=================================================="
+echo ""
+
+echo "1) Listening ports:"
+echo ""
+
+echo "WebUI port $WEBUI_PORT:"
+ss -ltnp "sport = :$WEBUI_PORT" 2>/dev/null || true
+echo ""
+
+echo "Ollama port $OLLAMA_PORT:"
+ss -ltnp "sport = :$OLLAMA_PORT" 2>/dev/null || true
+echo ""
+
+echo "2) Localhost binding check:"
+echo ""
+
+WEBUI_LINE="$(ss -ltnp "sport = :$WEBUI_PORT" 2>/dev/null || true)"
+OLLAMA_LINE="$(ss -ltnp "sport = :$OLLAMA_PORT" 2>/dev/null || true)"
+
+if echo "$WEBUI_LINE" | grep -qE '127\.0\.0\.1|\[::1\]'; then
+  echo "✅ WebUI appears bound to localhost."
+else
+  echo "⚠️ WebUI is not clearly bound to localhost, or it is not running."
+fi
+
+if echo "$OLLAMA_LINE" | grep -qE '127\.0\.0\.1|\[::1\]'; then
+  echo "✅ Ollama appears bound to localhost."
+else
+  echo "⚠️ Ollama is not clearly bound to localhost, or it is not running."
+fi
+
+if echo "$WEBUI_LINE" | grep -qE '0\.0\.0\.0|\[::\]'; then
+  echo "❌ WARNING: WebUI may be listening on all interfaces."
+fi
+
+if echo "$OLLAMA_LINE" | grep -qE '0\.0\.0\.0|\[::\]'; then
+  echo "❌ WARNING: Ollama may be listening on all interfaces."
+fi
+
+echo ""
+echo "3) File and folder permissions:"
+echo ""
+
+ls -ld "$BASE" 2>/dev/null || true
+ls -ld "$BASE/data" 2>/dev/null || true
+ls -ld "$BASE/models" 2>/dev/null || true
+ls -ld "$BASE/logs" 2>/dev/null || true
+ls -l "$BASE/.env" 2>/dev/null || true
+ls -l "$BASE/.webui_secret_key" 2>/dev/null || true
+
+echo ""
+echo "4) Service response check:"
+echo ""
+
+if curl -fsS "http://127.0.0.1:$OLLAMA_PORT/api/version" >/dev/null 2>&1; then
+  echo "✅ Ollama API responds locally."
+else
+  echo "⚠️ Ollama API did not respond locally."
+fi
+
+if curl -sS "http://127.0.0.1:$WEBUI_PORT" >/dev/null 2>&1; then
+  echo "✅ Open WebUI responds locally."
+else
+  echo "⚠️ Open WebUI did not respond locally."
+fi
+
+echo ""
+echo "=================================================="
+echo "Security notes:"
+echo "  - Localhost-only protects you from normal WiFi/LAN access."
+echo "  - It does not protect against malware already running as your user."
+echo "  - Do not expose these ports with router forwarding or SSH tunnels unless needed."
+echo "  - Web search and external APIs can still make outbound internet requests."
+echo "=================================================="
+CHECK4
+
+echo "📝 Creating README_SECURITY.txt..."
+cat > "$BASE/README_SECURITY.txt" <<EOF
+Secure Local Open WebUI Setup
+
+This instance is intended for local laptop use only.
+
+Enabled protections:
+
+- Open WebUI listens on 127.0.0.1:$WEBUI_PORT
+- Ollama listens on 127.0.0.1:$OLLAMA_PORT
+- Open WebUI authentication is enabled
+- New signups are disabled
+- CORS is restricted to localhost
+- Ollama origins are restricted to localhost
+- Secret key is stored in .webui_secret_key with chmod 600
+- Data/model folders are chmod 700
+
+Useful commands:
+
+Start:
+  $BASE/start.sh
+
+Stop:
+  $BASE/stop.sh
+
+Check security:
+  $BASE/check-security.sh
+
+Important:
+
+Do not expose ports $WEBUI_PORT or $OLLAMA_PORT to the internet unless you add stronger protection such as a reverse proxy, HTTPS, authentication, firewalling, or VPN access.
+
+Web search and external API features may send data out to the internet.
+EOF
+
+chmod +x "$BASE/start.sh" "$BASE/stop.sh" "$BASE/check-security.sh"
+chmod 600 "$BASE/.env" "$BASE/.webui_secret_key"
+chmod 700 "$BASE" "$BASE/data" "$BASE/models" "$BASE/logs" "$BASE/run"
+
+echo "=================================================="
+echo "✅ Secure Open WebUI v4 installed successfully!"
+echo ""
+echo "🌐 WebUI:"
+echo "  http://127.0.0.1:$WEBUI_PORT"
+echo ""
+echo "🧠 Ollama:"
+echo "  http://127.0.0.1:$OLLAMA_PORT"
+echo ""
+echo "Security features enabled:"
+echo "  - Authentication required"
+echo "  - New user signups disabled"
+echo "  - CORS restricted to localhost"
+echo "  - Ollama origins restricted"
+echo "  - WebUI bound to 127.0.0.1"
+echo "  - Ollama bound to 127.0.0.1"
+echo "  - Secret key stored in protected file"
+echo "  - Data and model folders locked down"
+echo ""
+echo "Helper commands:"
+echo "  Start:          $BASE/start.sh"
+echo "  Stop:           $BASE/stop.sh"
+echo "  Security check: $BASE/check-security.sh"
+echo "=================================================="
+
+echo "🚀 Starting Open WebUI now..."
+cd "$BASE"
+./start.sh
+REBUILD4
+
+chmod +x "$HOME/rebuild_openwebui3_v4.sh"
+"$HOME/rebuild_openwebui3_v4.sh"
