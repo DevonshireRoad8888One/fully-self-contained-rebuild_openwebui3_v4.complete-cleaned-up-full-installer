@@ -1,6 +1,11 @@
 # fully-self-contained-rebuild_openwebui3_v4.complete-cleaned-up-full-installer
 fully-self-contained-rebuild_openwebui3_v4.complete cleaned-up full installer...   :)
-pen.ai.gpt-5.5
+
+Just paste the code block into the Ubuntu terminal and Open Web.UI A.I. Webserver will be installed. At this point go to http://127.0.0.1:8001/ and you will create your Open Web.UI account, and thats it... :)
+
+The command to start the server from the terminal after the install is done,
+
+Open.ai.gpt-5.5
 Today at 7:13 AM
 Yes — and the earlier script output you got was visibly cut off, so here is a complete cleaned-up full installer that creates:
 
